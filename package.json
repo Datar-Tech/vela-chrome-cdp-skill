@@ -1,11 +1,9 @@
 {
-  "name": "pi-chrome-cdp",
+  "name": "vela-chrome-cdp",
   "version": "1.0.2",
-  "description": "Give your AI agent access to your live Chrome session — works out of the box, connects to tabs you already have open",
+  "description": "Give your AI agent access to your live Chrome session — connects to tabs you already have open via Chrome Extension, no remote debugging port needed",
   "keywords": [
-    "pi-package",
-    "pi",
-    "pi-coding-agent",
+    "claude-code",
     "skills",
     "chrome",
     "cdp",
@@ -15,11 +13,10 @@
   "license": "MIT",
   "files": [
     "skills/",
+    "extension/",
     "README.md"
   ],
-  "pi": {
-    "skills": [
-      "./skills"
-    ]
+  "dependencies": {
+    "ws": "^8.20.0"
   }
 }

@@ -1,8 +1,8 @@
-# chrome-cdp
+# Vela-chrome-cdp
 
 Let your AI agent see and interact with your **live Chrome session** — the tabs you already have open, your logged-in accounts, your current page state. No browser automation framework, no separate browser instance, no re-login.
 
-Works out of the box with any Chrome installation. One toggle to enable, nothing else to install.
+Uses a Chrome Extension with the `chrome.debugger` API — no remote debugging port, no blocking "Allow debugging?" modals. A non-blocking info bar appears briefly when a tab is first accessed.
 
 ## Why this matters
 
@@ -12,51 +12,102 @@ Most browser automation tools launch a fresh, isolated browser. This one connect
 - Interact with tabs you're actively working in
 - See the actual state of a page mid-workflow, not a clean reload
 
-## Installation
+## Advantages over alternatives
 
-### As a pi skill
+### Lightest context footprint of any browser automation skill
+
+As a Claude Code skill, `vela-chrome-cdp` loads at just **~683 tokens** — a tiny fraction of your context window. Compare:
+
+| Tool | Context cost |
+|---|---|
+| **vela-chrome-cdp** (this skill) | ~683 tokens |
+| Chrome DevTools MCP | ~10× more (reported 93% higher by agent-browser benchmarks) |
+| Playwright MCP | Heavy — MCP schema + Playwright tool definitions |
+| agent-browser | Larger tool surface → more tokens per session |
+
+This matters for long coding sessions: browser automation shouldn't eat your context budget.
+
+### Connects to your live Chrome — by design
+
+Most automation tools (Playwright MCP, Browser Use, Stagehand) launch a fresh isolated browser. You lose your logins, your tabs, your page state. `vela-chrome-cdp` was built from day one to attach to the Chrome you're already running:
+
+- No relaunching Chrome, no `--remote-debugging-port` flag
+- Your logged-in sessions (Gmail, GitHub, internal tools) are immediately accessible
+- Works with your normal Chrome profile
+- Uses `chrome.debugger` extension API — no blocking "Allow debugging?" modal, just a non-blocking info bar
+
+### Minimal dependencies, handles 100+ tabs
+
+- **Only dependency:** Node.js 22+ (no Puppeteer, no Playwright, no browser binaries)
+- Reliably enumerates and connects to 100+ open tabs (tools built on Puppeteer often timeout during target enumeration)
+- Raw CDP over WebSocket — no abstraction layers adding latency or unpredictability
+
+### Built for coding agents
+
+Commands map directly to what AI agents need: `list`, `shot`, `snap`, `eval`, `click`, `type`. The `snap` command returns a semantic accessibility tree — compact, structured, no vision model required. Designed as a Claude Code skill for tight terminal → browser loops.
+
+## Setup
+
+### 1. Install the extension
+
+1. Open Chrome → `chrome://extensions` → enable **Developer mode**
+2. Click **Load unpacked** → select the `extension/` directory from this repo
+
+No Chrome relaunch needed. The extension connects automatically on first use.
+
+### 2. Install dependencies
 
 ```bash
-pi install git:github.com/pasky/chrome-cdp-skill@v1.0.1
+npm install
 ```
 
-### For other agents (Amp, Claude Code, Cursor, etc.)
+### As a Claude Code skill
 
-Clone or copy the `skills/chrome-cdp/` directory wherever your agent loads skills or context from. The only runtime dependency is **Node.js 22+** — no npm install needed.
+Copy the `skills/vela-chrome-cdp/` directory into your project's `.claude/skills/`:
 
-### Enable remote debugging in Chrome
+```bash
+cp -r skills/vela-chrome-cdp/ /your/project/.claude/skills/vela-chrome-cdp/
+```
 
-Navigate to `chrome://inspect/#remote-debugging` and toggle the switch. That's it.
-
-The CLI auto-detects Chrome, Chromium, Brave, Edge, and Vivaldi on macOS, Linux, and Windows. If your browser stores `DevToolsActivePort` in a non-standard location, set the `CDP_PORT_FILE` environment variable to the full path.
+Claude Code will automatically load the skill and the `/vela-chrome-cdp` slash command will be available in your project.
 
 ## Usage
 
 ```bash
-scripts/cdp.mjs list                              # list open tabs
-scripts/cdp.mjs shot   <target>                   # screenshot → runtime dir
-scripts/cdp.mjs snap   <target>                   # accessibility tree (compact, semantic)
-scripts/cdp.mjs html   <target> [".selector"]     # full HTML or scoped to CSS selector
-scripts/cdp.mjs eval   <target> "expression"      # evaluate JS in page context
-scripts/cdp.mjs nav    <target> https://...       # navigate and wait for load
-scripts/cdp.mjs net    <target>                   # network resource timing
-scripts/cdp.mjs click  <target> "selector"        # click element by CSS selector
-scripts/cdp.mjs clickxy <target> <x> <y>          # click at CSS pixel coordinates
-scripts/cdp.mjs type   <target> "text"            # type at focused element (works in cross-origin iframes)
-scripts/cdp.mjs loadall <target> "selector"       # click "load more" until gone
-scripts/cdp.mjs evalraw <target> <method> [json]  # raw CDP command passthrough
-scripts/cdp.mjs open   [url]                      # open new tab (triggers Allow prompt)
-scripts/cdp.mjs stop   [target]                   # stop daemon(s)
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs list                              # list open tabs
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs shot   <target>                   # screenshot → runtime dir
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs snap   <target>                   # accessibility tree (compact, semantic)
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs html   <target> [selector]        # full HTML or scoped to CSS selector
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs eval   <target> "expr"            # evaluate JS in page context
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs nav    <target> https://...       # navigate and wait for load
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs net    <target>                   # network resource timing
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs click  <target> "selector"        # click element by CSS selector
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs clickxy <target> <x> <y>          # click at CSS pixel coordinates
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs type   <target> "text"            # type at focused element (works in cross-origin iframes)
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs loadall <target> "selector"       # click "load more" until gone
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs evalraw <target> <method> [json]  # raw CDP command passthrough
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs open   [url]                      # open new tab
+node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs stop                              # stop bridge daemon
 ```
 
 `<target>` is a unique prefix of the targetId shown by `list`.
 
-## Why not chrome-devtools-mcp?
-
-[chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) reconnects on every command, so Chrome's "Allow debugging" modal can re-appear repeatedly and target enumeration times out with many tabs open. `chrome-cdp` holds one persistent daemon per tab — the modal fires once, and it handles 100+ tabs reliably.
-
 ## How it works
 
-Connects directly to Chrome's remote debugging WebSocket — no Puppeteer, no intermediary. On first access to a tab, a lightweight background daemon is spawned that holds the session open. Chrome's "Allow debugging" modal appears once per tab; subsequent commands reuse the daemon silently. Daemons auto-exit after 20 minutes of inactivity.
+```
+AI agent CLI
+     ↓  named pipe
+Bridge daemon (auto-started on first command)
+     ↓  WebSocket ws://127.0.0.1:9229
+Chrome Extension (background service worker)
+     ↓  chrome.debugger API
+Your Chrome tabs
+```
 
-This approach is also why it handles 100+ open tabs reliably, where tools built on Puppeteer often time out during target enumeration.
+The bridge daemon starts automatically on the first command and stays alive in the background. The Chrome extension connects to it via WebSocket and executes CDP commands using `chrome.debugger` — no remote debugging port required.
+
+## Why not remote debugging port?
+
+The traditional `--remote-debugging-port=9222` approach requires relaunching Chrome with a special flag, shows a blocking "Allow debugging?" modal on every new tab connection, and exposes all tabs to any local process without consent UI.
+
+The extension approach needs no relaunch, shows only a non-blocking info bar, and works with your normal Chrome profile and all your existing sessions.

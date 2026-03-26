@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Vela CDP Bridge",
+  "version": "1.0.0",
+  "description": "Vela Chrome DevTools Protocol via extension API — no remote debugging port or blocking dialogs",
+  "permissions": ["debugger", "tabs", "alarms"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Vela CDP Bridge"
+  }
+}
