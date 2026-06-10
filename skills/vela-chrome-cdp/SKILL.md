@@ -76,3 +76,9 @@ CSS px = screenshot image px / DPR
 - The bridge daemon starts automatically and stays alive. A non-blocking yellow info bar appears in Chrome when a tab is first attached.
 - Run `node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs serve` to see bridge logs in the foreground (useful for debugging).
 - `eval` expressions can be multi-word: `node .claude/skills/vela-chrome-cdp/scripts/cdp-ext.mjs eval <target> document.title`
+
+## Troubleshooting
+
+- **`Cannot attach to this target` (on every tab, even new ones).** Chrome allows only ONE debugger client per tab. Another debugger already owns it — DevTools (F12) open on that tab, or another browser-automation extension (e.g. **Claude in Chrome**, **Codex**). This is a Chrome platform limit, not a bug here: close the tab's DevTools and disable the other automation extension, then retry. Don't run two debugger extensions at once.
+- **`Extension not connected` / empty `list` right after starting.** The extension's MV3 service worker reconnects to the bridge within ~1s; the CLI auto-retries transient drops, so just re-run the command. The bridge is a machine-wide singleton (one Chrome extension ↔ one bridge on port 9229) shared across all sessions — `stop` from one session restarts it for everyone, but it self-heals on the next command.
+- **`No target with given id` / `No target matching prefix`.** A page navigated or closed, so its targetId changed. The CLI now refreshes the page list automatically and retries; if it still fails, the tab is genuinely gone — run `list` to see current tabs.

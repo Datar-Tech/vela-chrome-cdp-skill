@@ -92,6 +92,14 @@ async function runBridge() {
   });
 
   wss.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      // Another bridge already owns the singleton port. The bridge is a
+      // machine-wide singleton by design (one Chrome extension ↔ one bridge),
+      // so this process is just the loser of a spawn race — exit quietly and
+      // let the CLI connect to the existing bridge instead of crashing.
+      process.stderr.write(`[cdp-ext bridge] Another bridge already running on :${WS_PORT}; exiting.\n`);
+      process.exit(0);
+    }
     process.stderr.write(`[cdp-ext bridge] WS server error: ${e.message}\n`);
     process.exit(1);
   });
@@ -177,8 +185,10 @@ async function runBridge() {
             res = { ok: true, result: info.join('\n') };
           }
 
-          // pages returned by list → update cache
-          if (res.ok && res.pages) {
+          // pages returned by list → update cache. Never clobber the cache with
+          // an empty list: that happens transiently while the extension is
+          // reconnecting, and would wipe targetIds that are still valid.
+          if (res.ok && Array.isArray(res.pages) && res.pages.length) {
             try { writeFileSync(PAGES_CACHE, JSON.stringify(res.pages)); } catch {}
           }
 
@@ -192,6 +202,12 @@ async function runBridge() {
   });
 
   cliServer.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      // Loser of a spawn race on the named pipe — another bridge owns it. Exit
+      // quietly; the CLI will connect to the existing bridge.
+      process.stderr.write(`[cdp-ext bridge] Another bridge already owns the CLI socket; exiting.\n`);
+      process.exit(0);
+    }
     process.stderr.write(`[cdp-ext bridge] CLI server error: ${e.message}\n`);
     process.exit(1);
   });
@@ -244,6 +260,40 @@ function sendCliCmd(conn, req) {
     req.id = 1;
     conn.write(JSON.stringify(req) + '\n');
   });
+}
+
+// ─── Resilience: auto-retry transient failures ───────────────────────────────
+// These errors are all symptoms of the bridge restarting or the extension's MV3
+// service worker reconnecting (a 0–30s window). They are transient, so the CLI
+// absorbs them with a few short retries instead of failing the user's command.
+const TRANSIENT = /Extension not connected|Cannot attach to this target|another debugger already owns|No target with given id|Bridge closed connection|Bridge unavailable|Command timed out|ECONNREFUSED|EPIPE/i;
+
+// Send one command, opening a fresh bridge connection each attempt.
+async function sendOnce(req) {
+  let conn;
+  try { conn = await getOrStartBridge(); }
+  catch (e) { return { ok: false, error: `Bridge unavailable: ${e.message}` }; }
+  try { return await sendCliCmd(conn, req); }
+  catch (e) { return { ok: false, error: e.message }; }
+}
+
+// Send with retry on transient errors. `attempts` total tries, short backoff.
+async function sendWithRetry(req, attempts = 4) {
+  let last = { ok: false, error: 'unknown error' };
+  for (let i = 0; i < attempts; i++) {
+    if (i) await sleep(500 * i); // 0, 500, 1000, 1500ms
+    last = await sendOnce(req);
+    if (last.ok) return last;
+    if (!TRANSIENT.test(last.error || '')) return last; // permanent → stop early
+  }
+  return last;
+}
+
+// Refresh the page cache by running a live `list` (bridge writes the cache on
+// success, but only when non-empty). Returns the parsed pages or [].
+async function refreshPages() {
+  await sendWithRetry({ cmd: 'list', args: [] }, 4);
+  try { return JSON.parse(readFileSync(PAGES_CACHE, 'utf8')); } catch { return []; }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -307,16 +357,14 @@ async function main() {
   }
 
   if (cmd === 'open') {
-    const conn = await getOrStartBridge();
-    const res = await sendCliCmd(conn, { cmd: 'open', args: [rest[0] || 'about:blank'] });
+    const res = await sendWithRetry({ cmd: 'open', args: [rest[0] || 'about:blank'] });
     if (res.ok) { if (res.result) console.log(res.result); }
     else { console.error('Error:', res.error); process.exitCode = 1; }
     return;
   }
 
   if (cmd === 'list' || cmd === 'ls') {
-    const conn = await getOrStartBridge();
-    const res = await sendCliCmd(conn, { cmd: 'list', args: [] });
+    const res = await sendWithRetry({ cmd: 'list', args: [] });
     if (res.ok) { if (res.result) console.log(res.result); }
     else { console.error('Error:', res.error); process.exitCode = 1; }
     return;
@@ -328,10 +376,6 @@ async function main() {
 
   const targetPrefix = rest[0];
   if (!targetPrefix) { console.error('Error: target ID required. Run "cdp-ext list" first.'); process.exit(1); }
-  if (!existsSync(PAGES_CACHE)) { console.error('No page list cached. Run "cdp-ext list" first.'); process.exit(1); }
-
-  const pages = JSON.parse(readFileSync(PAGES_CACHE, 'utf8'));
-  const targetId = resolvePrefix(targetPrefix, pages.map(p => p.targetId), 'target', 'Run "cdp-ext list".');
 
   const cmdArgs = rest.slice(1);
 
@@ -355,12 +399,40 @@ async function main() {
     console.error('Error: URL required'); process.exit(1);
   }
 
-  const conn = await getOrStartBridge();
-  // Always send full targetId as first arg so extension knows which tab
-  const response = await sendCliCmd(conn, { cmd, args: [targetId, ...cmdArgs] });
+  // Resolve the target prefix and run the command, retrying through the
+  // bridge/extension reconnect window. On a stale or missing cache (e.g. the
+  // page navigated and its targetId changed) we refresh the page list live and
+  // re-resolve, so the user doesn't have to manually re-run "list".
+  let pages = [];
+  try { pages = JSON.parse(readFileSync(PAGES_CACHE, 'utf8')); } catch {}
 
-  if (response.ok) { if (response.result) console.log(response.result); }
-  else { console.error('Error:', response.error); process.exitCode = 1; }
+  const ATTEMPTS = 4;
+  let lastErr = `No target matching prefix "${targetPrefix}".`;
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    // Refresh the page list live if the cache is empty, or on any retry.
+    if (!pages.length || attempt > 0) pages = await refreshPages();
+
+    let targetId;
+    try {
+      targetId = resolvePrefix(targetPrefix, pages.map(p => p.targetId), 'target', 'Run "cdp-ext list".');
+    } catch (e) {
+      lastErr = e.message;
+      if (/Ambiguous/.test(e.message)) break; // user must disambiguate — don't retry
+      continue; // stale/missing → next loop refreshes and retries
+    }
+
+    // Always send full targetId as first arg so extension knows which tab.
+    const response = await sendOnce({ cmd, args: [targetId, ...cmdArgs] });
+    if (response.ok) { if (response.result) console.log(response.result); return; }
+
+    lastErr = response.error;
+    if (!TRANSIENT.test(response.error || '')) break; // permanent error → stop
+    await sleep(500 * (attempt + 1));
+    pages = []; // force a live refresh next loop
+  }
+
+  console.error('Error:', lastErr);
+  process.exitCode = 1;
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });

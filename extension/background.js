@@ -5,13 +5,15 @@
 // non-blocking info-bar, no blocking "Allow debugging?" modal.
 
 const BRIDGE_WS_URL = 'ws://localhost:9229';
-const KEEPALIVE_MS = 20_000;
+const KEEPALIVE_MS = 15_000;
 const NAV_TIMEOUT = 30_000;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let ws = null;
 let wsConnected = false;
+let reconnectTimer = null;
+let reconnectDelay = 800; // ms, grows with backoff while the bridge is down
 
 // targetIds we have currently attached to
 const attached = new Set();
@@ -25,23 +27,41 @@ function safeSend(data) {
   if (ws && ws.readyState === WebSocket.OPEN) try { ws.send(data); } catch {}
 }
 
+// Single-shot reconnect with light backoff. Guarded by reconnectTimer so we
+// never stack timers (this is what the old "avoid cascade" comment worried
+// about — a single pending timer makes a cascade impossible).
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+}
+
 function connect() {
   // Guard: don't create a new connection if one is already open or connecting
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
+  // Tear down any stale socket before opening a new one. Detach its onclose
+  // first so the old socket can't trigger another reconnect — this kills the
+  // duplicate-connection / flapping we saw in the bridge logs.
+  if (ws) { try { ws.onclose = null; ws.onmessage = null; ws.close(); } catch {} ws = null; }
+
   let thisWs;
-  try { thisWs = new WebSocket(BRIDGE_WS_URL); } catch { return; }
+  try { thisWs = new WebSocket(BRIDGE_WS_URL); } catch { scheduleReconnect(); return; }
   ws = thisWs;
 
   thisWs.onopen = () => {
     if (ws !== thisWs) { thisWs.close(); return; } // superseded
     wsConnected = true;
+    reconnectDelay = 800; // reset backoff on a healthy connection
     console.log('[cdp-bridge] Connected to bridge at', BRIDGE_WS_URL);
   };
 
   thisWs.onclose = () => {
     if (ws === thisWs) { wsConnected = false; ws = null; }
-    // Don't retry with setTimeout — alarms handle reconnection to avoid cascade
+    // Fast single-shot reconnect: absorbs bridge restarts within ~1s while the
+    // service worker is still alive. The chrome.alarms tick (every 30s) remains
+    // the backstop for when the SW has been fully suspended.
+    scheduleReconnect();
   };
 
   thisWs.onerror = () => {};
@@ -60,8 +80,16 @@ function connect() {
   };
 }
 
-// Keep service worker alive (Chrome 116+: active WebSocket prevents sleep)
-setInterval(() => { safeSend(JSON.stringify({ type: 'ping' })); }, KEEPALIVE_MS);
+// Self-healing keepalive. While the SW is alive this keeps the WebSocket warm
+// (inbound/outbound WS traffic keeps the SW alive on Chrome 116+); if the socket
+// has dropped it reconnects immediately instead of waiting for the 30s alarm.
+// NOTE: setInterval does NOT survive SW suspension — chrome.alarms (below) is the
+// real wake mechanism once the SW is asleep. This interval only covers the
+// "SW still alive but socket dropped" case.
+setInterval(() => {
+  if (ws && ws.readyState === WebSocket.OPEN) safeSend(JSON.stringify({ type: 'ping' }));
+  else connect();
+}, KEEPALIVE_MS);
 
 // ─── chrome.debugger helpers ──────────────────────────────────────────────────
 
@@ -81,7 +109,21 @@ async function ensureAttached(targetId) {
   try {
     await chrome.debugger.attach({ targetId }, '1.3');
   } catch (e) {
-    if (!e.message?.includes('already attached')) throw e;
+    const msg = e.message || '';
+    // We're already attached from a prior call — fine, just record it.
+    if (msg.includes('already attached')) { attached.add(targetId); return; }
+    // Chrome allows only ONE debugger client per target. This is almost always
+    // another debugger holding the tab: DevTools (F12) open, or another
+    // automation extension (e.g. "Claude in Chrome", "Codex"). Surface a clear
+    // hint instead of the opaque "Cannot attach to this target".
+    if (msg.includes('Cannot attach')) {
+      throw new Error(
+        'Cannot attach to this target — another debugger already owns this tab. ' +
+        'Close its DevTools (F12) or disable other browser-automation extensions ' +
+        '(Claude in Chrome / Codex), then retry.'
+      );
+    }
+    throw e;
   }
   attached.add(targetId);
 }
