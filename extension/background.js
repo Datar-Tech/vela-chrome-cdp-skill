@@ -27,13 +27,17 @@ function safeSend(data) {
   if (ws && ws.readyState === WebSocket.OPEN) try { ws.send(data); } catch {}
 }
 
-// Single-shot reconnect with light backoff. Guarded by reconnectTimer so we
-// never stack timers (this is what the old "avoid cascade" comment worried
-// about — a single pending timer makes a cascade impossible).
+// Single-shot reconnect with backoff. Guarded by reconnectTimer so we never
+// stack timers (this is what the old "avoid cascade" comment worried about — a
+// single pending timer makes a cascade impossible). The first retry is fast
+// (800ms) so a quick bridge restart recovers in ~1s; if the bridge stays down
+// the delay backs off to 30s so we don't spam the extension error log with
+// benign "ws://localhost:9229 ERR_CONNECTION_REFUSED" entries (Chrome logs that
+// at the network layer on every attempt — it can't be caught/suppressed).
 function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, reconnectDelay);
-  reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+  reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
 }
 
 function connect() {
@@ -88,7 +92,7 @@ function connect() {
 // "SW still alive but socket dropped" case.
 setInterval(() => {
   if (ws && ws.readyState === WebSocket.OPEN) safeSend(JSON.stringify({ type: 'ping' }));
-  else connect();
+  else scheduleReconnect(); // respects the backoff guard — avoids racing extra connect() attempts
 }, KEEPALIVE_MS);
 
 // ─── chrome.debugger helpers ──────────────────────────────────────────────────
